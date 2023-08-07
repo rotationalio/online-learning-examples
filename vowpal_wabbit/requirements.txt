@@ -1,0 +1,4 @@
+pandas
+pyensign==0.8b0
+scikit-learn
+vowpalwabbit==9.8.0

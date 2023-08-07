@@ -1,17 +1,15 @@
 import os
+import re
 import sys
-import asyncio
 import json
+import asyncio
 from datetime import datetime
 
 import pandas as pd
 from pyensign.events import Event
 from pyensign.ensign import Ensign
-from river.naive_bayes import MultinomialNB
-from river.feature_extraction import BagOfWords
-from river.compose import Pipeline
-from river import metrics
-
+from sklearn.metrics import confusion_matrix,  precision_score, recall_score
+import vowpalwabbit
 
 async def handle_ack(ack):
     ts = datetime.fromtimestamp(ack.committed.seconds + ack.committed.nanos / 1e9)
@@ -20,9 +18,11 @@ async def handle_ack(ack):
 async def handle_nack(nack):
     print(f"Could not commit event {nack.id} with error {nack.code}: {nack.error}")
 
- 
+def to_vw_format(document, label=None):
+    return str(label or '') + ' |text ' + ' '.join(re.findall('\w{3,}', document.lower())) + '\n'
+
 class YelpDataPublisher:
-    def __init__(self, topic="river_pipeline", interval=1):
+    def __init__(self, topic="vw_pipeline", interval=1):
         self.topic = topic
         self.interval = interval
         self.ensign = Ensign()
@@ -35,85 +35,87 @@ class YelpDataPublisher:
 
     async def publish(self):
         """
-        Read data from the yelp.csv file and publish to river_pipeline topic.
+        Read data from the yelp_train.csv file and publish to vw_pipeline topic.
         This can be replaced by a real time streaming source
         Check out https://github.com/rotationalio/data-playground for examples
         """
         # create the topic if it does not exist
         await self.ensign.ensure_topic_exists(self.topic)
         train_df = pd.read_csv(os.path.join("data", "yelp.csv"))
+        # for binary classification, VW expects the labels to be 1 and -1
+        train_df["sentiment"] = train_df["sentiment"].apply(lambda x: 1 if x==1 else -1)
         train_dict = train_df.to_dict("records")
         for record in train_dict:
             print(record)
             event = Event(json.dumps(record).encode("utf-8"), mimetype="application/json")
             await self.ensign.publish(self.topic, event, on_ack=handle_ack, on_nack=handle_nack)
 
-        # In this example, we have reached the end of the file, so we will send a "done" message
-        # and the subscriber will use this message as a notification to print out the final statistics.
-        # In a production environment, this stream would be open forever, sending messages to the
-        # subscriber and the model and metrics will continually get updated.
         event = Event(json.dumps({"done":"yes"}).encode("utf-8"), mimetype="application/json")
         await self.ensign.publish(self.topic, event, on_ack=handle_ack, on_nack=handle_nack)
-        await asyncio.sleep(self.interval)   
-
+        await asyncio.sleep(self.interval)
+    
 
 class YelpDataSubscriber:
     """
-    The YelpDataSubscriber class reads from the river_pipeline topic and incrementally learns
+    The YelpDataSubscriber class reads from the vw_pipeline topic and incrementally learns
     from the data until it has learned from all of the instances.  It publishes the precision
-    and recall metrics to the river_metrics topic after they are calculated at each step.
+    and recall metrics to the vw_metrics topic after they are calculated at each step.
     """
 
-    def __init__(self, sub_topic="river_pipeline", pub_topic="river_metrics", interval=1):
+    def __init__(self, sub_topic="vw_pipeline", pub_topic="vw_metrics", interval=1):
         self.sub_topic = sub_topic
         self.pub_topic = pub_topic
         self.interval = interval
         self.ensign = Ensign()
-        self.initialize_model_and_metrics()
+        self.initialize_model()
 
     def run(self):
         """
-        Run the subscriber forever.
+        Run the publisher forever.
         """
         asyncio.get_event_loop().run_until_complete(self.subscribe())
 
-    def initialize_model_and_metrics(self):
-        """
-        Initialize a river model and set up metrics to evaluate the model as it learns
-        """
-        self.model = Pipeline(('vectorizer', BagOfWords(lowercase=True)),('nb', MultinomialNB()))
-        self.confusion_matrix = metrics.ConfusionMatrix(classes=[0,1])
-        self.classification_report = metrics.ClassificationReport()
-        self.precision_recall =  metrics.Precision(cm=self.confusion_matrix, pos_val=0) + metrics.Recall(cm=self.confusion_matrix, pos_val=0)
+    def initialize_model(self):
+        self.model = vowpalwabbit.Workspace("--loss_function=logistic -b 28 --ngram 3 --binary --quiet")
+        self.labels = []
+        self.preds = []
 
     async def run_model_pipeline(self, event):
         """
-        Make a prediction and update metrics based on the predicted value and the actual value
-        Incrementally learn/update model based on the actual value
-        Continue until "done" message is received
+        Receive messages from the websocket and publish events to Ensign.
         """
         record = json.loads(event.data)
-        print(record)
         if "done" not in record.keys():
-            y_pred = self.model.predict_one(record["text"])
-            if y_pred is not None:
-                self.confusion_matrix.update(y_true=record["sentiment"], y_pred=y_pred)
-                self.classification_report.update(y_true=record["sentiment"], y_pred=y_pred)
+            text = record["text"]
+            # convert the text to vw format (only pass in the text here and see how vw predicts)
+            train_instance = to_vw_format(text)
+            y_pred = int(self.model.predict(train_instance))
+            self.preds.append(y_pred)
+            label = record["sentiment"]
+            self.labels.append(label)
             # the precision and recall won't be great at first, but as the model learns on
             # new data, the scores improve
-            print(self.precision_recall)
-            pr_list = self.precision_recall.get()
-            pr_dict = {"precision": pr_list[0], "recall": pr_list[1]}
+            precision = precision_score(self.labels, self.preds, pos_label=-1, average="binary")
+            print(f"Precision: {precision}")
+            recall = recall_score(self.labels, self.preds, pos_label=-1, average="binary")
+            print(f"Recall: {recall}")
+            pr_dict = {"precision": precision, "recall": recall}
             event = Event(json.dumps(pr_dict).encode("utf-8"), mimetype="application/json")
             await self.ensign.publish(self.pub_topic, event, on_ack=handle_ack, on_nack=handle_nack)
-            # learn from the train example and update the model
-            self.model = self.model.learn_one(record["text"], record["sentiment"]) 
+
+            # pass the text and label this time so that the model can learn from the example
+            learn_instance = to_vw_format(text, label)
+            self.model.learn(learn_instance)
         else:
             # We are printing out the final metrics here because we have looped through all of 
             # the records.
-            print("Final Metrics", self.precision_recall)
-            print(self.classification_report)
-            print(self.confusion_matrix)
+            print("Final Metrics")
+            precision = precision_score(self.labels, self.preds, pos_label=-1, average="binary")
+            print(f"Precision: {precision}")
+            recall = recall_score(self.labels, self.preds, pos_label=-1, average="binary")
+            print(f"Recall: {recall}")
+            cm = confusion_matrix(self.labels, self.preds)
+            print(cm)
 
     async def subscribe(self):
         """
@@ -126,16 +128,16 @@ class YelpDataSubscriber:
 
         async for event in self.ensign.subscribe(self.sub_topic):
             await self.run_model_pipeline(event)
-        
+
 
 class MetricsSubscriber:
     """
-    The MetricsSubscriber class reads from the river_metrics topic and checks to see
+    The MetricsSubscriber class reads from the vw_metrics topic and checks to see
     if the precision and recall have fallen below a specified threshold and prints to screen.
     This code can be extended to update a dashboard and/or send alerts.
     """
 
-    def __init__(self, topic="river_metrics", threshold=0.60, interval=1):
+    def __init__(self, topic="vw_metrics", threshold=0.60, interval=1):
         self.topic = topic
         self.interval = interval
         self.threshold = threshold
@@ -170,6 +172,7 @@ class MetricsSubscriber:
         async for event in self.ensign.subscribe(self.topic):
             await self.check_metrics(event)
 
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         if sys.argv[1] == "publish":
@@ -182,6 +185,6 @@ if __name__ == "__main__":
             subscriber = MetricsSubscriber()
             subscriber.run()
         else:
-            print("Usage: python river_sentiment_analysis.py [publish|subscribe|metrics]")
+            print("Usage: python vw_sentiment_analysis.py [publish|subscribe|metrics]")
     else:
-        print("Usage: python river_sentiment_analysis.py [publish|subscribe|metrics]")
+        print("Usage: python vw_sentiment_analysis.py [publish|subscribe|metrics]")
