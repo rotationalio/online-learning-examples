@@ -83,7 +83,9 @@ class YelpDataSubscriber:
 
     async def run_model_pipeline(self, event):
         """
-        Receive messages from the websocket and publish events to Ensign.
+        Make a prediction and update metrics based on the predicted value and the actual value
+        Incrementally learn/update model based on the actual value
+        Continue until "done" message is received
         """
         record = json.loads(event.data)
         if "done" not in record.keys():
