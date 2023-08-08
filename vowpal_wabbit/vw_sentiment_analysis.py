@@ -5,6 +5,7 @@ import json
 import asyncio
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 from pyensign.events import Event
 from pyensign.ensign import Ensign
@@ -76,7 +77,7 @@ class YelpDataSubscriber:
         asyncio.get_event_loop().run_until_complete(self.subscribe())
 
     def initialize_model(self):
-        self.model = vowpalwabbit.Workspace("--loss_function=logistic -b 28 --ngram 3 --binary --quiet")
+        self.model = vowpalwabbit.Workspace("--loss_function=logistic --bit_precision=28 --ngram=3 --binary --quiet")
         self.labels = []
         self.preds = []
 
@@ -95,9 +96,9 @@ class YelpDataSubscriber:
             self.labels.append(label)
             # the precision and recall won't be great at first, but as the model learns on
             # new data, the scores improve
-            precision = precision_score(self.labels, self.preds, pos_label=-1, average="binary")
+            precision = precision_score(self.labels, self.preds, pos_label=-1, average="binary", zero_division=np.nan)
             print(f"Precision: {precision}")
-            recall = recall_score(self.labels, self.preds, pos_label=-1, average="binary")
+            recall = recall_score(self.labels, self.preds, pos_label=-1, average="binary", zero_division=np.nan)
             print(f"Recall: {recall}")
             pr_dict = {"precision": precision, "recall": recall}
             event = Event(json.dumps(pr_dict).encode("utf-8"), mimetype="application/json")
@@ -110,9 +111,9 @@ class YelpDataSubscriber:
             # We are printing out the final metrics here because we have looped through all of 
             # the records.
             print("Final Metrics")
-            precision = precision_score(self.labels, self.preds, pos_label=-1, average="binary")
+            precision = precision_score(self.labels, self.preds, pos_label=-1, average="binary", zero_division=np.nan)
             print(f"Precision: {precision}")
-            recall = recall_score(self.labels, self.preds, pos_label=-1, average="binary")
+            recall = recall_score(self.labels, self.preds, pos_label=-1, average="binary", zero_division=np.nan)
             print(f"Recall: {recall}")
             cm = confusion_matrix(self.labels, self.preds)
             print(cm)
