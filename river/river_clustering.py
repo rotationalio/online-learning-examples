@@ -47,8 +47,8 @@ class HousingDataPublisher:
 
 class HousingDataSubscriber:
     """
-    The HousingDataSubscriber class reads from the housing-json topic and incrementally makes 
-    predictions and learns from the data.
+    The HousingDataSubscriber class reads from the housing-json topic and incrementally 
+    learns from the data and generates clusters.
     """
 
     def __init__(self, topic="housing-json"):
@@ -65,6 +65,7 @@ class HousingDataSubscriber:
     def initialize_model(self):
         """
         Initialize a river clustering model
+        Update the parameters as needed for your project
         """
         self.model = STREAMKMeans(chunk_size=3, n_clusters=2, halflife=0.5, sigma=1.5, seed=0)
 

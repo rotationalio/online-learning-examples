@@ -98,7 +98,7 @@ $ pip install -r requirements.txt
 $ source venv/bin/activate
 ```
 ```
-$ python river_sentiment_clustering.py subscribe
+$ python river_clustering.py subscribe
 ```
 
 #### Run the HousingDataPublisher in the second window (make sure to activate the virtual environment first)
