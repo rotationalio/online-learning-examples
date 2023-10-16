@@ -1,3 +1,3 @@
 pandas
-pyensign==0.8b0
+pyensign==0.11b0
 river
